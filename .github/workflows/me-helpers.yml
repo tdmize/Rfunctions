@@ -1,0 +1,60 @@
+name: ME helper validation
+
+on:
+  push:
+    paths: [ME_helper_functions.R, tests/test_ME_helpers.R, .github/workflows/me-helpers.yml]
+  pull_request:
+    paths: [ME_helper_functions.R, tests/test_ME_helpers.R, .github/workflows/me-helpers.yml]
+  workflow_dispatch:
+    inputs:
+      suest_ref:
+        description: suest branch or commit containing the categorical alignment fix
+        default: main
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        marginaleffects: ['0.32.0', '1.0.0']
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.os }} / marginaleffects ${{ matrix.marginaleffects }}
+    env:
+      ME_TEST_OUTPUT: validation-results
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: tdmize/suest
+          ref: ${{ inputs.suest_ref || 'main' }}
+          path: validation-suest
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+          use-public-rspm: true
+      - name: Install validation dependencies
+        shell: Rscript {0}
+        run: |
+          install.packages(c("remotes", "insight", "nnet", "MASS", "sandwich", "numDeriv", "survey", "ordinal"))
+          remotes::install_version("marginaleffects", version = "${{ matrix.marginaleffects }}",
+            dependencies = c("Depends", "Imports", "LinkingTo"), upgrade = "never")
+          remotes::install_local("validation-suest", dependencies = c("Depends", "Imports", "LinkingTo"),
+            upgrade = "never", build_vignettes = FALSE)
+          required <- c("marginaleffects", "insight", "nnet", "MASS", "sandwich", "numDeriv", "survey", "ordinal", "suest")
+          available <- vapply(required, requireNamespace, logical(1), quietly = TRUE)
+          if (any(!available)) stop("Missing validation dependencies: ", paste(required[!available], collapse = ", "))
+          stopifnot(as.character(packageVersion("marginaleffects")) == "${{ matrix.marginaleffects }}")
+          print(vapply(required, function(p) as.character(packageVersion(p)), character(1)))
+      - name: Check estimates, standard errors, and input safeguards
+        run: Rscript tests/test_ME_helpers.R
+      - name: Retain results and session information
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: me-helpers-${{ matrix.os }}-${{ matrix.marginaleffects }}
+          path: validation-results

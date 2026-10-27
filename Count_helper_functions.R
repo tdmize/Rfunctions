@@ -58,9 +58,21 @@ countfit <- function(formula, data, inflate = NULL, maxcount = 9,
 
   # Fit each model; stop with a clear message if any fail or do not converge
   zctl <- pscl::zeroinfl.control(reltol = 1e-12)
+  nbstart <- function(th) tryCatch(suppressWarnings(if (is.null(th))
+    MASS::glm.nb(formula, data = data, na.action = na.omit) else
+    MASS::glm.nb(formula, data = data, na.action = na.omit, init.theta = th)), error = function(e) NULL)
+  nbfit <- function() {
+    m <- nbstart(NULL)
+    if (is.null(m) || !is.null(m$th.warn) || m$theta > 1000) {  # glm.nb's default start can fail; try others
+      fits <- Filter(Negate(is.null), c(list(m), lapply(c(1, 0.1, 0.01), nbstart)))
+      if (!length(fits)) stop("estimation failed from every starting value")
+      m <- fits[[which.max(sapply(fits, function(x) as.numeric(logLik(x))))]]
+    }
+    m
+  }
   fitters <- list(
     PRM  = function() glm(formula, family = poisson, data = data, na.action = na.omit),
-    NBRM = function() MASS::glm.nb(formula, data = data, na.action = na.omit),
+    NBRM = nbfit,
     ZIP  = function() pscl::zeroinfl(zformula, data = data, dist = "poisson", na.action = na.omit, control = zctl),
     ZINB = function() pscl::zeroinfl(zformula, data = data, dist = "negbin", na.action = na.omit, control = zctl))
   mods <- list()
@@ -69,9 +81,18 @@ countfit <- function(formula, data, inflate = NULL, maxcount = 9,
     fit <- tryCatch(fitters[[m]](), error = function(e) conditionMessage(e))
     if (is.character(fit)) why[m] <- fit
     else if (isFALSE(fit$converged) || !is.finite(logLik(fit)) || !all(is.finite(na.omit(coef(fit)))))
-      why[m] <- "did not converge"
+      why[m] <- "the estimation stopped before converging"
     else mods[[m]] <- fit
   }
+  # A model that fits worse than the simpler model nested in it did not reach its maximum
+  ll <- sapply(mods, function(m) as.numeric(logLik(m)))
+  for (pr in list(c("PRM", "NBRM"), c("ZIP", "ZINB"), c("PRM", "ZIP"), c("NBRM", "ZINB"))) {
+    if (all(pr %in% names(mods)) && ll[pr[2]] < ll[pr[1]] - 1) {
+      why[pr[2]] <- "fit worse than the simpler nested model"
+      mods[[pr[2]]] <- NULL
+    }
+  }
+  why <- why[intersect(sel, names(why))]
   if (length(why)) {
     ok <- setdiff(sel, names(why))
     stop("The ", paste(names(why), collapse = " and "), " model", if (length(why) > 1) "s",
@@ -102,7 +123,6 @@ countfit <- function(formula, data, inflate = NULL, maxcount = 9,
   # Fit statistics and pairwise comparisons; dif = first model - second model
   bic <- sapply(mods, BIC)
   aic <- sapply(mods, AIC)
-  ll <- sapply(mods, function(m) as.numeric(logLik(m)))
   fit <- data.frame(BIC = bic, AIC = aic, row.names = sel)
   tests <- lrtests <- NULL
   if (length(sel) > 1) {
